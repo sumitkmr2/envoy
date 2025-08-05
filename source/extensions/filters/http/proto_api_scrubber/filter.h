@@ -35,6 +35,8 @@ private:
                      absl::string_view rc_detail);
 
   bool is_valid_grpc_request_ = false;
+
+  // Would be set to true if any fully formed message is received.
   bool fully_formed_grpc_messages_received_ = false;
 
   // Request message converter which converts Envoy Buffer data to StreamMessage (for scrubbing) and
