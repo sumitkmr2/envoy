@@ -68,13 +68,17 @@ envoy_cc_test(
     rbe_pool = "6gig",
     deps = [
         "//source/common/grpc:common_lib",
+        "//source/extensions/filters/http/common:factory_base_lib",
+        "//source/extensions/filters/http/common:pass_through_filter_lib",
         "//source/extensions/filters/http/proto_api_scrubber:config",
         "//source/extensions/matching/http/cel_input:cel_input_lib",
         "//source/extensions/matching/input_matchers/cel_matcher:config",
         "//test/extensions/filters/http/grpc_field_extraction/message_converter:message_converter_test_lib",
         "//test/integration:http_protocol_integration_lib",
         "//test/proto:apikeys_proto_cc_proto",
+        "//test/test_common:registry_lib",
         "@com_google_absl//absl/strings:str_format",
+        "@com_google_cel_cpp//eval/public/structs:cel_proto_wrapper",
         "@envoy_api//envoy/extensions/filters/http/proto_api_scrubber/v3:pkg_cc_proto",
     ],
 )

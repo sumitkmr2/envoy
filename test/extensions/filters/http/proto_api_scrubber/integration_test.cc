@@ -1,11 +1,22 @@
 #include "envoy/extensions/filters/http/proto_api_scrubber/v3/config.pb.h"
 #include "envoy/grpc/status.h"
+#include "envoy/registry/registry.h"        // Required for InjectFactory
+#include "envoy/server/filter_config.h"     // For NamedHttpFilterConfigFactory
+#include "envoy/stream_info/filter_state.h" // Required for FilterState::Object
+
+#include "source/extensions/filters/http/common/factory_base.h"
+#include "source/extensions/filters/http/common/pass_through_filter.h"
 
 #include "test/extensions/filters/http/grpc_field_extraction/message_converter/message_converter_test_lib.h"
 #include "test/integration/http_protocol_integration.h"
 #include "test/proto/apikeys.pb.h"
+#include "test/test_common/registry.h" // Required for InjectFactory
 
+#include "eval/public/cel_value.h" // Required for CelValue::Type definition
+#include "eval/public/structs/cel_proto_wrapper.h"
 #include "fmt/format.h"
+#include "google/protobuf/empty.pb.h"
+#include "google/protobuf/struct.pb.h" // Required for Struct/ListValue
 
 namespace Envoy {
 namespace Extensions {
@@ -52,6 +63,71 @@ constexpr absl::string_view kCelAlwaysFalse = R"pb(
     }
   }
 )pb";
+
+// 1. Filter State Object Wrapper
+class ProtobufFilterStateObject : public ::Envoy::StreamInfo::FilterState::Object {
+public:
+  explicit ProtobufFilterStateObject(std::unique_ptr<::google::protobuf::Message> msg)
+      : msg_(std::move(msg)) {}
+
+  // FIX: Use serializeAsProto instead of reflect.
+  // This is the supported method in your Envoy version for exposing data.
+  ::Envoy::ProtobufTypes::MessagePtr serializeAsProto() const override {
+    // We must return a new copy because the signature returns a unique_ptr
+    auto new_msg = std::unique_ptr<::google::protobuf::Message>(msg_->New());
+    new_msg->CopyFrom(*msg_);
+    return new_msg;
+  }
+
+private:
+  std::unique_ptr<::google::protobuf::Message> msg_;
+};
+
+// 2. Injector Filter
+class MetadataInjectorFilter : public ::Envoy::Http::PassThroughDecoderFilter {
+public:
+  ::Envoy::Http::FilterHeadersStatus decodeHeaders(::Envoy::Http::RequestHeaderMap&,
+                                                   bool) override {
+    auto metadata = std::make_unique<::google::protobuf::Struct>();
+    auto* list_value = (*metadata->mutable_fields())["visibility"].mutable_list_value();
+    list_value->add_values()->set_string_value("LABEL1");
+    list_value->add_values()->set_string_value("INTERNAL");
+
+    decoder_callbacks_->streamInfo().filterState()->setData(
+        "com.google.cloudesf.stream_metadata",
+        std::make_shared<ProtobufFilterStateObject>(std::move(metadata)),
+        ::Envoy::StreamInfo::FilterState::StateType::ReadOnly);
+
+    return ::Envoy::Http::FilterHeadersStatus::Continue;
+  }
+};
+
+// 3. Factory Registration
+class MetadataInjectorConfigFactory
+    : public ::Envoy::Server::Configuration::NamedHttpFilterConfigFactory {
+public:
+  absl::StatusOr<::Envoy::Http::FilterFactoryCb>
+  createFilterFactoryFromProto(const ::Envoy::Protobuf::Message&, const std::string&,
+                               ::Envoy::Server::Configuration::FactoryContext&) override {
+    return [](::Envoy::Http::FilterChainFactoryCallbacks& callbacks) {
+      callbacks.addStreamDecoderFilter(std::make_shared<MetadataInjectorFilter>());
+    };
+  }
+
+  ::Envoy::ProtobufTypes::MessagePtr createEmptyConfigProto() override {
+    return std::make_unique<::google::protobuf::Empty>();
+  }
+
+  std::string name() const override { return "test_injector"; }
+};
+
+// 4. Static Registration
+static MetadataInjectorConfigFactory* metadata_injector_config_factory =
+    new MetadataInjectorConfigFactory();
+
+static ::Envoy::Registry::InjectFactory<
+    ::Envoy::Server::Configuration::NamedHttpFilterConfigFactory>
+    register_injector(*metadata_injector_config_factory);
 
 class ProtoApiScrubberIntegrationTest : public HttpProtocolIntegrationTest {
 public:
@@ -326,6 +402,89 @@ TEST_P(ProtoApiScrubberIntegrationTest, ScrubNestedField_MatcherFalse) {
   Buffer::OwnedImpl data;
   data.add(upstream_request_->body());
   checkSerializedData<apikeys::CreateApiKeyRequest>(data, {original_proto});
+
+  upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
+  ASSERT_TRUE(response->waitForEndStream());
+}
+
+TEST_P(ProtoApiScrubberIntegrationTest, ScrubBasedOnFilterState) {
+  // Logic: filter_state['com.google.cloudesf.stream_metadata'].visibility.exists(...)
+  // AST Structure:
+  // 1. CALL 'exists'
+  //    Target: 2. CALL 'index' (Access .visibility)
+  //            Target: 3. CALL 'index' (Access filter_state['key'])
+  //                    Target: 4. IDENT 'filter_state'  <--- CHANGED FROM CALL to IDENT
+  //                    Arg:    5. CONST 'com.google.cloudesf.stream_metadata'
+  //            Arg:    6. CONST 'visibility'
+
+  const std::string cel_expression_config = R"EOF(
+                              cel_expr_parsed:
+                                expr:
+                                  id: 1
+                                  call_expr:
+                                    function: "exists"
+                                    target:
+                                      id: 2
+                                      call_expr:
+                                        function: "index"
+                                        args:
+                                          - id: 3
+                                            call_expr:
+                                              function: "index"
+                                              args:
+                                                - id: 4
+                                                  ident_expr:
+                                                    name: "filter_state"  # <--- THE FIX
+                                                - id: 5
+                                                  const_expr:
+                                                    string_value: "com.google.cloudesf.stream_metadata"
+                                          - id: 6
+                                            const_expr:
+                                              string_value: "visibility"
+                                    args:
+                                      - id: 7
+                                        ident_expr:
+                                          name: "l"
+                                      - id: 8
+                                        call_expr:
+                                          function: "_in_"
+                                          args:
+                                            - id: 9
+                                              ident_expr:
+                                                name: "l"
+                                            - id: 10
+                                              list_expr:
+                                                elements:
+                                                  - const_expr:
+                                                      string_value: "LABEL1"
+                                                  - const_expr:
+                                                      string_value: "LABEL2"
+                                source_info:
+                                  syntax_version: "cel1"
+                                  location: "inline_expression"
+                                  positions:
+                                    1: 0
+)EOF";
+
+  config_helper_.prependFilter("{ name: test_injector }");
+  config_helper_.prependFilter(getFilterConfig(apikeysDescriptorPath(), kCreateApiKeyMethod,
+                                               "parent", cel_expression_config));
+
+  initialize();
+
+  auto original_proto = makeCreateApiKeyRequest(R"pb(
+    parent: "sensitive-data"
+  )pb");
+
+  auto response = sendGrpcRequest(original_proto, kCreateApiKeyMethod);
+  waitForNextUpstreamRequest();
+
+  apikeys::CreateApiKeyRequest expected = original_proto;
+  expected.clear_parent();
+
+  Buffer::OwnedImpl data;
+  data.add(upstream_request_->body());
+  checkSerializedData<apikeys::CreateApiKeyRequest>(data, {expected});
 
   upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
   ASSERT_TRUE(response->waitForEndStream());
