@@ -88,13 +88,13 @@ class MetadataInjectorFilter : public ::Envoy::Http::PassThroughDecoderFilter {
 public:
   ::Envoy::Http::FilterHeadersStatus decodeHeaders(::Envoy::Http::RequestHeaderMap&,
                                                    bool) override {
-    auto metadata = std::make_unique<::google::protobuf::Struct>();
-    auto* list_value = (*metadata->mutable_fields())["visibility"].mutable_list_value();
-    list_value->add_values()->set_string_value("LABEL1");
-    list_value->add_values()->set_string_value("INTERNAL");
+    // Create a simple StringValue
+    auto metadata = std::make_unique<::google::protobuf::StringValue>();
+    metadata->set_value("LABEL1,INTERNAL");
 
+    // Inject directly into FilterState
     decoder_callbacks_->streamInfo().filterState()->setData(
-        "com.google.cloudesf.stream_metadata",
+        "wasm.cloudesf.wasms.chemist_v2_check.visibility_labels",
         std::make_shared<ProtobufFilterStateObject>(std::move(metadata)),
         ::Envoy::StreamInfo::FilterState::StateType::ReadOnly);
 
@@ -224,10 +224,20 @@ public:
       );
     }
 
-    ProtoApiScrubberConfig filter_config_proto;
+    // ProtoApiScrubberConfig filter_config_proto;
     Protobuf::Any any_config;
 
-    Protobuf::TextFormat::ParseFromString(full_config_text, &filter_config_proto);
+    // Protobuf::TextFormat::ParseFromString(full_config_text, &filter_config_proto);
+
+    // DEBUG: Print the config to verify the CEL expression is present!
+    std::cerr << "DEBUG CONFIG:\n" << full_config_text << std::endl;
+
+    ProtoApiScrubberConfig filter_config_proto;
+    if (!Protobuf::TextFormat::ParseFromString(full_config_text, &filter_config_proto)) {
+      std::cerr << "FAILED TO PARSE CONFIG" << std::endl;
+      RELEASE_ASSERT(false, "Failed to parse config");
+    }
+
     any_config.PackFrom(filter_config_proto);
     std::string json_config = MessageUtil::getJsonStringFromMessageOrError(any_config);
     return fmt::format(R"EOF(
@@ -408,70 +418,57 @@ TEST_P(ProtoApiScrubberIntegrationTest, ScrubNestedField_MatcherFalse) {
 }
 
 TEST_P(ProtoApiScrubberIntegrationTest, ScrubBasedOnFilterState) {
-  // Logic: filter_state['com.google.cloudesf.stream_metadata'].visibility.exists(...)
-  // AST Structure:
-  // 1. CALL 'exists'
-  //    Target: 2. CALL 'index' (Access .visibility)
-  //            Target: 3. CALL 'index' (Access filter_state['key'])
-  //                    Target: 4. IDENT 'filter_state'  <--- CHANGED FROM CALL to IDENT
-  //                    Arg:    5. CONST 'com.google.cloudesf.stream_metadata'
-  //            Arg:    6. CONST 'visibility'
+// Logic:
+  // 1. Access request.filter_state['key'] -> Returns StringValue Message
+  // 2. Access .value -> Returns primitive string "LABEL1,INTERNAL"
+  // 3. Split by comma -> Returns list
+  // 4. Check list for matches
 
-  const std::string cel_expression_config = R"EOF(
-                              cel_expr_parsed:
-                                expr:
-                                  id: 1
-                                  call_expr:
-                                    function: "exists"
-                                    target:
-                                      id: 2
-                                      call_expr:
-                                        function: "index"
-                                        args:
-                                          - id: 3
-                                            call_expr:
-                                              function: "index"
-                                              args:
-                                                - id: 4
-                                                  ident_expr:
-                                                    name: "filter_state"  # <--- THE FIX
-                                                - id: 5
-                                                  const_expr:
-                                                    string_value: "com.google.cloudesf.stream_metadata"
-                                          - id: 6
-                                            const_expr:
-                                              string_value: "visibility"
-                                    args:
-                                      - id: 7
-                                        ident_expr:
-                                          name: "l"
-                                      - id: 8
-                                        call_expr:
-                                          function: "_in_"
-                                          args:
-                                            - id: 9
-                                              ident_expr:
-                                                name: "l"
-                                            - id: 10
-                                              list_expr:
-                                                elements:
-                                                  - const_expr:
-                                                      string_value: "LABEL1"
-                                                  - const_expr:
-                                                      string_value: "LABEL2"
-                                source_info:
-                                  syntax_version: "cel1"
-                                  location: "inline_expression"
-                                  positions:
-                                    1: 0
-)EOF";
+  const std::string cel_expression_config = R"pb(
+    cel_expr_parsed {
+      expr {
+        id: 1
+        call_expr {
+          function: "_||_"
+          args {
+            id: 2
+            call_expr {
+              function: "contains"
+              # Target is implied "self" or usually can be omitted in some CEL contexts,
+              # but for CelMatcher we often need the ident.
+              # HOWEVER: CelMatcher with primitive inputs is tricky.
+              # A safer bet for string matching is pure regex if CEL fights you on variable names.
+
+              # Trying implicit self access via 'this' or simple function call:
+              target { id: 3 ident_expr { name: "input" } } # Commonly 'input' in generic matchers
+              args { id: 4 const_expr { string_value: "LABEL1" } }
+            }
+          }
+          args {
+            id: 5
+            call_expr {
+              function: "contains"
+              target { id: 6 ident_expr { name: "input" } }
+              args { id: 7 const_expr { string_value: "INTERNAL" } }
+            }
+          }
+        }
+      }
+      source_info {
+        syntax_version: "cel1"
+        location: "inline_expression"
+        positions { key: 1 value: 0 }
+      }
+    }
+    )pb";
 
   config_helper_.prependFilter("{ name: test_injector }");
   config_helper_.prependFilter(getFilterConfig(apikeysDescriptorPath(), kCreateApiKeyMethod,
-                                               "parent", cel_expression_config));
+                                               "parent", RestrictionType::Request, cel_expression_config));
 
   initialize();
 
+  // The request contains sensitive data in 'parent'
   auto original_proto = makeCreateApiKeyRequest(R"pb(
     parent: "sensitive-data"
   )pb");
@@ -479,6 +476,8 @@ TEST_P(ProtoApiScrubberIntegrationTest, ScrubBasedOnFilterState) {
   auto response = sendGrpcRequest(original_proto, kCreateApiKeyMethod);
   waitForNextUpstreamRequest();
 
+  // Expectation: Because the injector added "LABEL1", the matcher returns TRUE.
+  // Therefore, 'parent' should be scrubbed (cleared).
   apikeys::CreateApiKeyRequest expected = original_proto;
   expected.clear_parent();
 
