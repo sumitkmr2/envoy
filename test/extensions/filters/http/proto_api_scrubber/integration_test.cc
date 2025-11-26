@@ -20,9 +20,6 @@
 #include "eval/public/cel_value.h" // Required for CelValue::Type definition
 #include "eval/public/structs/cel_proto_wrapper.h"
 #include "fmt/format.h"
-#include "google/api/expr/v1alpha1/syntax.pb.h"
-#include "google/protobuf/empty.pb.h"
-#include "google/protobuf/struct.pb.h" // Required for Struct/ListValue
 #include "parser/parser.h"
 
 namespace Envoy {
@@ -147,7 +144,7 @@ public:
 
   // Change 2: Return 'Struct' instead of 'Empty' to satisfy the assertion
   ::Envoy::ProtobufTypes::MessagePtr createEmptyConfigProto() override {
-    return std::make_unique<::google::protobuf::Struct>();
+    return std::make_unique<Protobuf::Struct>();
   }
 
   std::string name() const override { return "test_injector"; }
