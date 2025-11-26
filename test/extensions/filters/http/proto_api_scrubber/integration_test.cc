@@ -1,3 +1,5 @@
+#include <google/api/expr/v1alpha1/checked.pb.h>
+
 #include "envoy/extensions/filters/http/proto_api_scrubber/v3/config.pb.h"
 #include "envoy/extensions/filters/http/proto_api_scrubber/v3/matcher_actions.pb.h"
 #include "envoy/grpc/status.h"
@@ -6,9 +8,9 @@
 #include "envoy/server/filter_config.h"     // For NamedHttpFilterConfigFactory
 #include "envoy/stream_info/filter_state.h" // Required for FilterState::Object
 
+#include "source/common/router/string_accessor_impl.h"
 #include "source/extensions/filters/http/common/factory_base.h"
 #include "source/extensions/filters/http/common/pass_through_filter.h"
-#include "source/common/router/string_accessor_impl.h"
 
 #include "test/extensions/filters/http/grpc_field_extraction/message_converter/message_converter_test_lib.h"
 #include "test/integration/http_protocol_integration.h"
@@ -18,13 +20,10 @@
 #include "eval/public/cel_value.h" // Required for CelValue::Type definition
 #include "eval/public/structs/cel_proto_wrapper.h"
 #include "fmt/format.h"
+#include "google/api/expr/v1alpha1/syntax.pb.h"
 #include "google/protobuf/empty.pb.h"
 #include "google/protobuf/struct.pb.h" // Required for Struct/ListValue
-
-#include <google/api/expr/v1alpha1/checked.pb.h>
-
 #include "parser/parser.h"
-#include "google/api/expr/v1alpha1/syntax.pb.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -42,35 +41,40 @@ using ::Envoy::Extensions::HttpFilters::GrpcFieldExtraction::checkSerializedData
 
 // 1. Define the Action Class
 class TestRemoveFieldAction
-    : public Envoy::Matcher::ActionBase<envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction> {
+    : public Envoy::Matcher::ActionBase<
+          envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction> {
 public:
   absl::string_view typeUrl() const override {
-    return "type.googleapis.com/envoy.extensions.filters.http.proto_api_scrubber.v3.RemoveFieldAction";
+    return "type.googleapis.com/"
+           "envoy.extensions.filters.http.proto_api_scrubber.v3.RemoveFieldAction";
   }
 };
 
 // 2. Define the Factory
 class TestRemoveFilterActionFactory
-    : public Envoy::Matcher::ActionFactory<envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction> {
+    : public Envoy::Matcher::ActionFactory<
+          envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction> {
 public:
   std::string name() const override { return "remove_field"; }
 
   // FIX: Matches filter_config.h signature exactly
-  Envoy::Matcher::ActionConstSharedPtr createAction(
-      const Envoy::Protobuf::Message&,
-      envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction&,
-      Envoy::ProtobufMessage::ValidationVisitor&) override {
+  Envoy::Matcher::ActionConstSharedPtr
+  createAction(const Envoy::Protobuf::Message&,
+               envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction&,
+               Envoy::ProtobufMessage::ValidationVisitor&) override {
     return std::make_shared<TestRemoveFieldAction>();
   }
 
   Envoy::ProtobufTypes::MessagePtr createEmptyConfigProto() override {
-    return std::make_unique<envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction>();
+    return std::make_unique<
+        envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction>();
   }
 };
 
 // 3. Register the Factory
 static TestRemoveFilterActionFactory* test_action_factory = new TestRemoveFilterActionFactory();
-static Envoy::Registry::InjectFactory<Envoy::Matcher::ActionFactory<envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction>>
+static Envoy::Registry::InjectFactory<Envoy::Matcher::ActionFactory<
+    envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction>>
     register_test_action_factory(*test_action_factory);
 
 std::string apikeysDescriptorPath() {
@@ -109,7 +113,6 @@ constexpr absl::string_view kCelAlwaysFalse = R"pb(
   }
 )pb";
 
-
 // Injector: Writes to StreamInfo::FilterState
 class MetadataInjectorFilter : public ::Envoy::Http::PassThroughDecoderFilter {
 public:
@@ -123,8 +126,7 @@ public:
     // Use the built-in Router::StringAccessorImpl
     // This implements serializeAsString() automatically, so your Regex Matcher will work.
     decoder_callbacks_->streamInfo().filterState()->setData(
-        key,
-        std::make_shared<::Envoy::Router::StringAccessorImpl>(value),
+        key, std::make_shared<::Envoy::Router::StringAccessorImpl>(value),
         ::Envoy::StreamInfo::FilterState::StateType::ReadOnly);
 
     return ::Envoy::Http::FilterHeadersStatus::Continue;
@@ -171,12 +173,12 @@ public:
   enum class RestrictionType { Request, Response };
 
   // Helper to build config using FilterStateInput instead of HttpAttributes
-// Helper to build config using FilterStateInput
-std::string getFilterConfigWithFilterStateInput(const std::string& descriptor_path,
-                                                const std::string& filter_state_key,
-                                                const std::string& cel_matcher_proto_text) {
-  // We use fmt::format to inject the FilterStateInput typed_config
-  return fmt::format(R"pb(
+  // Helper to build config using FilterStateInput
+  std::string getFilterConfigWithFilterStateInput(const std::string& descriptor_path,
+                                                  const std::string& filter_state_key,
+                                                  const std::string& cel_matcher_proto_text) {
+    // We use fmt::format to inject the FilterStateInput typed_config
+    return fmt::format(R"pb(
     filtering_mode: OVERRIDE
     descriptor_set {{
       data_source {{
@@ -226,12 +228,12 @@ std::string getFilterConfigWithFilterStateInput(const std::string& descriptor_pa
       }}
     }}
   )pb",
-  descriptor_path,      // {0}
-  kCreateApiKeyMethod,  // {1}
-  filter_state_key,     // {2}
-  cel_matcher_proto_text // {3}
-  );
-}
+                       descriptor_path,       // {0}
+                       kCreateApiKeyMethod,   // {1}
+                       filter_state_key,      // {2}
+                       cel_matcher_proto_text // {3}
+    );
+  }
 
   // Helper to build the configuration using readable Protobuf Text Format.
   std::string getFilterConfig(const std::string& descriptor_path,
@@ -389,12 +391,10 @@ apikeys::CreateApiKeyRequest makeCreateApiKeyRequest(absl::string_view pb = R"pb
   return request;
 }
 
-
 TEST_P(ProtoApiScrubberIntegrationTest, Ast) {
   printAst("request.headers['user-agent'].contains('curl')");
   printAst("filter_state['visibility.labels'].contains('INTERNAL')");
 }
-
 
 // ============================================================================
 // TEST GROUP 1: PASS THROUGH
@@ -586,7 +586,8 @@ TEST_P(ProtoApiScrubberIntegrationTest, ScrubBasedOnMultipleLabelsRegex) {
         }}
       }}
     }}
-  )pb", apikeysDescriptorPath(), kCreateApiKeyMethod);
+  )pb",
+                                           apikeysDescriptorPath(), kCreateApiKeyMethod);
 
   ProtoApiScrubberConfig proto_config;
   ASSERT_TRUE(Protobuf::TextFormat::ParseFromString(config_pb_text, &proto_config));
@@ -594,9 +595,11 @@ TEST_P(ProtoApiScrubberIntegrationTest, ScrubBasedOnMultipleLabelsRegex) {
   any_config.PackFrom(proto_config);
 
   // 2. Setup Chain
-  config_helper_.prependFilter(fmt::format(R"EOF(
+  config_helper_.prependFilter(
+      fmt::format(R"EOF(
       name: envoy.filters.http.proto_api_scrubber
-      typed_config: {})EOF", MessageUtil::getJsonStringFromMessageOrError(any_config)));
+      typed_config: {})EOF",
+                  MessageUtil::getJsonStringFromMessageOrError(any_config)));
   config_helper_.prependFilter("{ name: test_injector }");
 
   initialize();

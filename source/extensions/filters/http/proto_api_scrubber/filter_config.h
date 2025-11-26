@@ -198,7 +198,8 @@ private:
 class MatcherInputValidatorVisitor : public Matcher::MatchTreeValidationVisitor<HttpMatchingData> {
 public:
   // Validates whether the input type for the matcher is in the list of supported input types.
-  // ProtoApiScrubber filter supports all types of data inputs and hence, it returns `absl::OkStatus()` by default.
+  // ProtoApiScrubber filter supports all types of data inputs and hence, it returns
+  // `absl::OkStatus()` by default.
   absl::Status performDataInputValidation(const Matcher::DataInputFactory<HttpMatchingData>&,
                                           absl::string_view) override {
     return absl::OkStatus();
