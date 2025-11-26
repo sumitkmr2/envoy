@@ -67,7 +67,10 @@ envoy_cc_test(
     # extension_names = ["envoy.filters.http.proto_api_scrubber"],
     rbe_pool = "6gig",
     deps = [
+        "//envoy/matcher:matcher_interface",
         "//source/common/grpc:common_lib",
+        "//source/common/matcher:matcher_lib",
+        "//source/common/router:string_accessor_lib",
         "//source/extensions/filters/http/common:factory_base_lib",
         "//source/extensions/filters/http/common:pass_through_filter_lib",
         "//source/extensions/filters/http/proto_api_scrubber:config",
@@ -78,7 +81,9 @@ envoy_cc_test(
         "//test/proto:apikeys_proto_cc_proto",
         "//test/test_common:registry_lib",
         "@com_google_absl//absl/strings:str_format",
+        "@com_google_cel_cpp//eval/public:builtin_func_registrar",  # Often needed if you go further
         "@com_google_cel_cpp//eval/public/structs:cel_proto_wrapper",
+        "@com_google_cel_cpp//parser",
         "@envoy_api//envoy/extensions/filters/http/proto_api_scrubber/v3:pkg_cc_proto",
     ],
 )

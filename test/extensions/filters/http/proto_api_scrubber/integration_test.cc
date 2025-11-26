@@ -1,11 +1,14 @@
 #include "envoy/extensions/filters/http/proto_api_scrubber/v3/config.pb.h"
+#include "envoy/extensions/filters/http/proto_api_scrubber/v3/matcher_actions.pb.h"
 #include "envoy/grpc/status.h"
+#include "envoy/matcher/matcher.h"
 #include "envoy/registry/registry.h"        // Required for InjectFactory
 #include "envoy/server/filter_config.h"     // For NamedHttpFilterConfigFactory
 #include "envoy/stream_info/filter_state.h" // Required for FilterState::Object
 
 #include "source/extensions/filters/http/common/factory_base.h"
 #include "source/extensions/filters/http/common/pass_through_filter.h"
+#include "source/common/router/string_accessor_impl.h"
 
 #include "test/extensions/filters/http/grpc_field_extraction/message_converter/message_converter_test_lib.h"
 #include "test/integration/http_protocol_integration.h"
@@ -18,6 +21,11 @@
 #include "google/protobuf/empty.pb.h"
 #include "google/protobuf/struct.pb.h" // Required for Struct/ListValue
 
+#include <google/api/expr/v1alpha1/checked.pb.h>
+
+#include "parser/parser.h"
+#include "google/api/expr/v1alpha1/syntax.pb.h"
+
 namespace Envoy {
 namespace Extensions {
 namespace HttpFilters {
@@ -27,6 +35,43 @@ namespace {
 using envoy::extensions::filters::http::proto_api_scrubber::v3::ProtoApiScrubberConfig;
 using envoy::extensions::filters::network::http_connection_manager::v3::HttpFilter;
 using ::Envoy::Extensions::HttpFilters::GrpcFieldExtraction::checkSerializedData;
+
+// --- ADD THIS BLOCK TO integration_test.cc ---
+
+// --- PASTE THIS INTO integration_test.cc ---
+
+// 1. Define the Action Class
+class TestRemoveFieldAction
+    : public Envoy::Matcher::ActionBase<envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction> {
+public:
+  absl::string_view typeUrl() const override {
+    return "type.googleapis.com/envoy.extensions.filters.http.proto_api_scrubber.v3.RemoveFieldAction";
+  }
+};
+
+// 2. Define the Factory
+class TestRemoveFilterActionFactory
+    : public Envoy::Matcher::ActionFactory<envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction> {
+public:
+  std::string name() const override { return "remove_field"; }
+
+  // FIX: Matches filter_config.h signature exactly
+  Envoy::Matcher::ActionConstSharedPtr createAction(
+      const Envoy::Protobuf::Message&,
+      envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction&,
+      Envoy::ProtobufMessage::ValidationVisitor&) override {
+    return std::make_shared<TestRemoveFieldAction>();
+  }
+
+  Envoy::ProtobufTypes::MessagePtr createEmptyConfigProto() override {
+    return std::make_unique<envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction>();
+  }
+};
+
+// 3. Register the Factory
+static TestRemoveFilterActionFactory* test_action_factory = new TestRemoveFilterActionFactory();
+static Envoy::Registry::InjectFactory<Envoy::Matcher::ActionFactory<envoy::extensions::filters::http::proto_api_scrubber::v3::RemoveFieldAction>>
+    register_test_action_factory(*test_action_factory);
 
 std::string apikeysDescriptorPath() {
   return TestEnvironment::runfilesPath("test/proto/apikeys.descriptor");
@@ -64,48 +109,32 @@ constexpr absl::string_view kCelAlwaysFalse = R"pb(
   }
 )pb";
 
-// 1. Filter State Object Wrapper
-class ProtobufFilterStateObject : public ::Envoy::StreamInfo::FilterState::Object {
-public:
-  explicit ProtobufFilterStateObject(std::unique_ptr<::google::protobuf::Message> msg)
-      : msg_(std::move(msg)) {}
 
-  // FIX: Use serializeAsProto instead of reflect.
-  // This is the supported method in your Envoy version for exposing data.
-  ::Envoy::ProtobufTypes::MessagePtr serializeAsProto() const override {
-    // We must return a new copy because the signature returns a unique_ptr
-    auto new_msg = std::unique_ptr<::google::protobuf::Message>(msg_->New());
-    new_msg->CopyFrom(*msg_);
-    return new_msg;
-  }
-
-private:
-  std::unique_ptr<::google::protobuf::Message> msg_;
-};
-
-// 2. Injector Filter
+// Injector: Writes to StreamInfo::FilterState
 class MetadataInjectorFilter : public ::Envoy::Http::PassThroughDecoderFilter {
 public:
   ::Envoy::Http::FilterHeadersStatus decodeHeaders(::Envoy::Http::RequestHeaderMap&,
                                                    bool) override {
-    // Create a simple StringValue
-    auto metadata = std::make_unique<::google::protobuf::StringValue>();
-    metadata->set_value("LABEL1,INTERNAL");
+    const std::string key = "wasm.cloudesf.wasms.chemist_v2_check.visibility_labels";
+    const std::string value = "LABEL1,INTERNAL";
 
-    // Inject directly into FilterState
+    std::cerr << ">>> TEST INJECTOR: Writing to FilterState..." << std::endl;
+
+    // Use the built-in Router::StringAccessorImpl
+    // This implements serializeAsString() automatically, so your Regex Matcher will work.
     decoder_callbacks_->streamInfo().filterState()->setData(
-        "wasm.cloudesf.wasms.chemist_v2_check.visibility_labels",
-        std::make_shared<ProtobufFilterStateObject>(std::move(metadata)),
+        key,
+        std::make_shared<::Envoy::Router::StringAccessorImpl>(value),
         ::Envoy::StreamInfo::FilterState::StateType::ReadOnly);
 
     return ::Envoy::Http::FilterHeadersStatus::Continue;
   }
 };
 
-// 3. Factory Registration
 class MetadataInjectorConfigFactory
     : public ::Envoy::Server::Configuration::NamedHttpFilterConfigFactory {
 public:
+  // Change 1: Update the config type in the validation signature
   absl::StatusOr<::Envoy::Http::FilterFactoryCb>
   createFilterFactoryFromProto(const ::Envoy::Protobuf::Message&, const std::string&,
                                ::Envoy::Server::Configuration::FactoryContext&) override {
@@ -114,8 +143,9 @@ public:
     };
   }
 
+  // Change 2: Return 'Struct' instead of 'Empty' to satisfy the assertion
   ::Envoy::ProtobufTypes::MessagePtr createEmptyConfigProto() override {
-    return std::make_unique<::google::protobuf::Empty>();
+    return std::make_unique<::google::protobuf::Struct>();
   }
 
   std::string name() const override { return "test_injector"; }
@@ -139,6 +169,69 @@ public:
   }
 
   enum class RestrictionType { Request, Response };
+
+  // Helper to build config using FilterStateInput instead of HttpAttributes
+// Helper to build config using FilterStateInput
+std::string getFilterConfigWithFilterStateInput(const std::string& descriptor_path,
+                                                const std::string& filter_state_key,
+                                                const std::string& cel_matcher_proto_text) {
+  // We use fmt::format to inject the FilterStateInput typed_config
+  return fmt::format(R"pb(
+    filtering_mode: OVERRIDE
+    descriptor_set {{
+      data_source {{
+        filename: "{0}"
+      }}
+    }}
+    restrictions {{
+      method_restrictions {{
+        key: "{1}"
+        value {{
+          request_field_restrictions {{
+            key: "parent"
+            value {{
+              matcher {{
+                matcher_list {{
+                  matchers {{
+                    predicate {{
+                      single_predicate {{
+                        input {{
+                          name: "envoy.matching.inputs.filter_state"
+                          typed_config {{
+                            [type.googleapis.com/envoy.extensions.matching.common_inputs.network.v3.FilterStateInput] {{
+                              key: "wasm.cloudesf.wasms.chemist_v2_check.visibility_labels"
+                            }}
+                          }}
+                        }}
+                        # USE SIMPLE CONTAINS FOR DEBUGGING
+                        value_match {{
+                          contains: "LABEL1"
+                        }}
+                      }}
+                    }}
+                    on_match {{
+                      action {{
+                        name: "remove_field"
+                        typed_config {{
+                          [type.googleapis.com/envoy.extensions.filters.http.proto_api_scrubber.v3.RemoveFieldAction] {{}}
+                        }}
+                      }}
+                    }}
+                  }}
+                }}
+              }}
+            }}
+          }}
+        }}
+      }}
+    }}
+  )pb",
+  descriptor_path,      // {0}
+  kCreateApiKeyMethod,  // {1}
+  filter_state_key,     // {2}
+  cel_matcher_proto_text // {3}
+  );
+}
 
   // Helper to build the configuration using readable Protobuf Text Format.
   std::string getFilterConfig(const std::string& descriptor_path,
@@ -246,6 +339,24 @@ public:
                        json_config);
   }
 
+  void printAst(std::string expr_str = "request.headers['user-agent'].contains('curl')") {
+    // 1. Invoke the CEL Parser
+    // Returns a google::api::expr::parser::ParseStatus
+    auto parse_status = google::api::expr::parser::Parse(expr_str);
+
+    if (!parse_status.ok()) {
+      // Handle error: parse_status.status() contains the error message
+      return;
+    }
+
+    // 2. Get the ParsedExpr Protobuf
+    // This object contains the AST and source info.
+    const auto& parsed_expr = parse_status.value();
+
+    std::cout << "Parsed AST: " << std::endl;
+    std::cout << parsed_expr.DebugString() << std::endl;
+  }
+
   template <typename T>
   IntegrationStreamDecoderPtr sendGrpcRequest(const T& request_msg,
                                               const std::string& method_path) {
@@ -277,6 +388,13 @@ apikeys::CreateApiKeyRequest makeCreateApiKeyRequest(absl::string_view pb = R"pb
   Protobuf::TextFormat::ParseFromString(pb, &request);
   return request;
 }
+
+
+TEST_P(ProtoApiScrubberIntegrationTest, Ast) {
+  printAst("request.headers['user-agent'].contains('curl')");
+  printAst("filter_state['visibility.labels'].contains('INTERNAL')");
+}
+
 
 // ============================================================================
 // TEST GROUP 1: PASS THROUGH
@@ -417,69 +535,84 @@ TEST_P(ProtoApiScrubberIntegrationTest, ScrubNestedField_MatcherFalse) {
   ASSERT_TRUE(response->waitForEndStream());
 }
 
-TEST_P(ProtoApiScrubberIntegrationTest, ScrubBasedOnFilterState) {
-// Logic:
-  // 1. Access request.filter_state['key'] -> Returns StringValue Message
-  // 2. Access .value -> Returns primitive string "LABEL1,INTERNAL"
-  // 3. Split by comma -> Returns list
-  // 4. Check list for matches
+TEST_P(ProtoApiScrubberIntegrationTest, ScrubBasedOnMultipleLabelsRegex) {
+  // LOGIC:
+  // 1. Injector writes "LABEL1,INTERNAL"
+  // 2. Regex matches "LABEL1" -> Returns TRUE.
+  // 3. Action: Remove "key.display_name" (Nested field)
 
-  const std::string cel_expression_config = R"pb(
-    cel_expr_parsed {
-      expr {
-        id: 1
-        call_expr {
-          function: "_||_"
-          args {
-            id: 2
-            call_expr {
-              function: "contains"
-              # Target is implied "self" or usually can be omitted in some CEL contexts,
-              # but for CelMatcher we often need the ident.
-              # HOWEVER: CelMatcher with primitive inputs is tricky.
-              # A safer bet for string matching is pure regex if CEL fights you on variable names.
+  // 1. Config
+  std::string config_pb_text = fmt::format(R"pb(
+    filtering_mode: OVERRIDE
+    descriptor_set {{ data_source {{ filename: "{0}" }} }}
+    restrictions {{
+      method_restrictions {{
+        key: "{1}"
+        value {{
+          request_field_restrictions {{
+            key: "key.display_name"
+            value {{
+              matcher {{
+                matcher_list {{
+                  matchers {{
+                    predicate {{
+                      single_predicate {{
+                        input {{
+                          name: "envoy.matching.inputs.filter_state"
+                          typed_config {{
+                            [type.googleapis.com/envoy.extensions.matching.common_inputs.network.v3.FilterStateInput] {{
+                              key: "wasm.cloudesf.wasms.chemist_v2_check.visibility_labels"
+                            }}
+                          }}
+                        }}
+                        value_match {{
+                          contains: "LABEL1"
+                        }}
+                      }}
+                    }}
+                    on_match {{
+                      action {{
+                        name: "remove_field"
+                        typed_config {{
+                          [type.googleapis.com/envoy.extensions.filters.http.proto_api_scrubber.v3.RemoveFieldAction] {{}}
+                        }}
+                      }}
+                    }}
+                  }}
+                }}
+              }}
+            }}
+          }}
+        }}
+      }}
+    }}
+  )pb", apikeysDescriptorPath(), kCreateApiKeyMethod);
 
-              # Trying implicit self access via 'this' or simple function call:
-              target { id: 3 ident_expr { name: "input" } } # Commonly 'input' in generic matchers
-              args { id: 4 const_expr { string_value: "LABEL1" } }
-            }
-          }
-          args {
-            id: 5
-            call_expr {
-              function: "contains"
-              target { id: 6 ident_expr { name: "input" } }
-              args { id: 7 const_expr { string_value: "INTERNAL" } }
-            }
-          }
-        }
-      }
-      source_info {
-        syntax_version: "cel1"
-        location: "inline_expression"
-        positions { key: 1 value: 0 }
-      }
-    }
-    )pb";
+  ProtoApiScrubberConfig proto_config;
+  ASSERT_TRUE(Protobuf::TextFormat::ParseFromString(config_pb_text, &proto_config));
+  Protobuf::Any any_config;
+  any_config.PackFrom(proto_config);
 
+  // 2. Setup Chain
+  config_helper_.prependFilter(fmt::format(R"EOF(
+      name: envoy.filters.http.proto_api_scrubber
+      typed_config: {})EOF", MessageUtil::getJsonStringFromMessageOrError(any_config)));
   config_helper_.prependFilter("{ name: test_injector }");
-  config_helper_.prependFilter(getFilterConfig(apikeysDescriptorPath(), kCreateApiKeyMethod,
-                                               "parent", RestrictionType::Request, cel_expression_config));
 
   initialize();
 
-  // The request contains sensitive data in 'parent'
+  // 3. Request with Nested Data
   auto original_proto = makeCreateApiKeyRequest(R"pb(
-    parent: "sensitive-data"
+    parent: "should-stay"
+    key { display_name: "sensitive-name" }
   )pb");
 
   auto response = sendGrpcRequest(original_proto, kCreateApiKeyMethod);
   waitForNextUpstreamRequest();
 
-  // Expectation: Because the injector added "LABEL1", the matcher returns TRUE.
-  // Therefore, 'parent' should be scrubbed (cleared).
+  // 4. Verify Nested Scrubbing
   apikeys::CreateApiKeyRequest expected = original_proto;
-  expected.clear_parent();
+  expected.mutable_key()->clear_display_name(); // Expect this to be cleared
 
   Buffer::OwnedImpl data;
   data.add(upstream_request_->body());
