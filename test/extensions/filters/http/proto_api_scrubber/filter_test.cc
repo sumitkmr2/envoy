@@ -334,6 +334,32 @@ TEST_F(ProtoApiScrubberRequestRejectedTests, RequestBufferLimitedExceeded) {
             filter_->decodeData(*request_data, true));
 }
 
+// Tests failure during reconstruction of the request buffer (output side).
+// This verifies the new error handling when convertBackToBuffer fails.
+TEST_F(ProtoApiScrubberRequestRejectedTests, RequestReconstructionBufferLimitExceeded) {
+  CreateApiKeyRequest request = makeCreateApiKeyRequest();
+  Envoy::Buffer::InstancePtr request_data = Envoy::Grpc::Common::serializeToGrpcFrame(request);
+
+  // Set limit exactly to data length. Often convertBackToBuffer fails if there is any overhead
+  // or strict checks during reconstruction.
+  ON_CALL(mock_decoder_callbacks_, decoderBufferLimit())
+      .WillByDefault(testing::Return(request_data->length()));
+
+  TestRequestHeaderMapImpl req_headers =
+      TestRequestHeaderMapImpl{{":method", "POST"},
+                               {":path", "/apikeys.ApiKeys/CreateApiKey"},
+                               {"content-type", "application/grpc"}};
+  EXPECT_EQ(Envoy::Http::FilterHeadersStatus::Continue, filter_->decodeHeaders(req_headers, true));
+
+  EXPECT_CALL(
+      mock_decoder_callbacks_,
+      sendLocalReply(Http::Code::BadRequest, testing::_, Eq(nullptr),
+                     Eq(Envoy::Grpc::Status::FailedPrecondition),
+                     "proto_api_scrubber_FAILED_PRECONDITION{REQUEST_BUFFER_CONVERSION_FAIL}"));
+  EXPECT_EQ(Envoy::Http::FilterDataStatus::StopIterationNoBuffer,
+            filter_->decodeData(*request_data, true));
+}
+
 TEST_F(ProtoApiScrubberRequestRejectedTests, ResponseBufferLimitedExceeded) {
   ON_CALL(mock_encoder_callbacks_, encoderBufferLimit()).WillByDefault(testing::Return(0));
 
@@ -356,6 +382,36 @@ TEST_F(ProtoApiScrubberRequestRejectedTests, ResponseBufferLimitedExceeded) {
                   Http::Code::BadRequest, "Rejected because internal buffer limits are exceeded.",
                   Eq(nullptr), Eq(Envoy::Grpc::Status::FailedPrecondition),
                   "proto_api_scrubber_FAILED_PRECONDITION{RESPONSE_BUFFER_CONVERSION_FAIL}"));
+  EXPECT_EQ(Envoy::Http::FilterDataStatus::StopIterationNoBuffer,
+            filter_->encodeData(*response_data, true));
+}
+
+// Tests failure during reconstruction of the response buffer.
+// This verifies the new error handling when convertBackToBuffer fails.
+TEST_F(ProtoApiScrubberRequestRejectedTests, ResponseReconstructionBufferLimitExceeded) {
+  ApiKey response = makeCreateApiKeyResponse();
+  Envoy::Buffer::InstancePtr response_data = Envoy::Grpc::Common::serializeToGrpcFrame(response);
+
+  // Set limit exactly to data length.
+  ON_CALL(mock_encoder_callbacks_, encoderBufferLimit())
+      .WillByDefault(testing::Return(response_data->length()));
+
+  TestRequestHeaderMapImpl req_headers =
+      TestRequestHeaderMapImpl{{":method", "POST"},
+                               {":path", "/apikeys.ApiKeys/CreateApiKey"},
+                               {"content-type", "application/grpc"}};
+  EXPECT_EQ(Envoy::Http::FilterHeadersStatus::Continue, filter_->decodeHeaders(req_headers, true));
+
+  TestResponseHeaderMapImpl resp_headers =
+      TestResponseHeaderMapImpl{{":status", "200"}, {"content-type", "application/grpc"}};
+  EXPECT_EQ(Envoy::Http::FilterHeadersStatus::Continue,
+            filter_->encodeHeaders(resp_headers, false));
+
+  EXPECT_CALL(
+      mock_encoder_callbacks_,
+      sendLocalReply(Http::Code::BadRequest, testing::_, Eq(nullptr),
+                     Eq(Envoy::Grpc::Status::FailedPrecondition),
+                     "proto_api_scrubber_FAILED_PRECONDITION{RESPONSE_BUFFER_CONVERSION_FAIL}"));
   EXPECT_EQ(Envoy::Http::FilterDataStatus::StopIterationNoBuffer,
             filter_->encodeData(*response_data, true));
 }

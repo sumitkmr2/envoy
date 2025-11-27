@@ -188,15 +188,26 @@ Http::FilterDataStatus ProtoApiScrubberFilter::decodeData(Buffer::Instance& data
       continue;
     }
 
-    auto status = request_scrubber_->Scrub(stream_message->message());
-    if (!status.ok()) {
+    auto request_scrubber_or_status = request_scrubber_->Scrub(stream_message->message());
+    if (!request_scrubber_or_status.ok()) {
       ENVOY_STREAM_LOG(warn, "Scrubbing failed with error: {}. The request will not be modified.",
-                       *decoder_callbacks_, status.ToString());
+                       *decoder_callbacks_, request_scrubber_or_status.ToString());
     }
 
     auto buf_convert_status =
         request_msg_converter_->convertBackToBuffer(std::move(stream_message));
-    RELEASE_ASSERT(buf_convert_status.ok(), "failed to convert message back to envoy buffer");
+    if (!buf_convert_status.ok()) {
+      const absl::Status& status = buf_convert_status.status();
+      ENVOY_STREAM_LOG(error, "Failed to convert scrubbed message back to envoy buffer: {}",
+                       *decoder_callbacks_, status.ToString());
+
+      // Send a local reply if request conversion failed.
+      rejectRequest(status.raw_code(), status.message(),
+                    formatError(kRcDetailFilterProtoApiScrubber,
+                                absl::StatusCodeToString(status.code()),
+                                kRcDetailErrorRequestBufferConversion));
+      return Envoy::Http::FilterDataStatus::StopIterationNoBuffer;
+    }
 
     data.move(*buf_convert_status.value());
   }
